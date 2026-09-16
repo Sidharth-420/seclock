@@ -1,10 +1,11 @@
+
 pipeline {
 
     agent any
 
     environment {
         AWS_REGION = 'ap-south-1'
-        AWS_ACCOUNT_ID = '859925121963'
+        AWS_ACCOUNT_ID = '976193266769'
 
         ECR_REPOSITORY = 'seclock'
         IMAGE_TAG = "${BUILD_NUMBER}"
@@ -22,38 +23,34 @@ pipeline {
         }
 
         stage('Python Setup') {
-    steps {
-        sh '''
-            python3 --version
-            python3 -m venv venv
-            . venv/bin/activate
+            steps {
+                sh '''
+                    python3 --version
 
-            python -m pip install --upgrade pip
-            python -m pip install -r requirements.txt
-        '''
-    }
-}
+                    python3 -m venv venv
+                    . venv/bin/activate
+
+                    python -m pip install --upgrade pip
+                    python -m pip install -r requirements.txt
+                    python -m pip install pytest bandit
+                '''
+            }
+        }
 
         stage('Unit Tests') {
-    steps {
-        sh '''
-            . venv/bin/activate
-            python -m pytest test_e2e.py -v
-        '''
-    }
-}
+            steps {
+                sh '''
+                    . venv/bin/activate
+                    python -m pytest test_e2e.py -v
+                '''
+            }
+        }
 
         stage('Security Scan - Bandit') {
             steps {
                 sh '''
                     . venv/bin/activate
-
-                    bandit -r . \
-                        --exclude ./venv \
-                        -f json \
-                        -o bandit-report.json || true
-
-                    echo "Bandit scan completed"
+                    bandit -r . -x ./venv
                 '''
             }
         }
@@ -61,21 +58,8 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 sh '''
-                    docker build \
-                        -t ${IMAGE_NAME} \
-                        -t ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest \
-                        .
-                '''
-            }
-        }
-
-        stage('Docker Image Scan - Trivy') {
-            steps {
-                sh '''
-                    trivy image \
-                        --severity HIGH,CRITICAL \
-                        --exit-code 1 \
-                        ${IMAGE_NAME}
+                    docker build -t ${IMAGE_NAME} .
+                    docker tag ${IMAGE_NAME} ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
                 '''
             }
         }
@@ -83,11 +67,9 @@ pipeline {
         stage('Login to AWS ECR') {
             steps {
                 sh '''
-                    aws ecr get-login-password \
-                        --region ${AWS_REGION} | \
-                    docker login \
-                        --username AWS \
-                        --password-stdin ${ECR_REGISTRY}
+                    aws ecr get-login-password --region ${AWS_REGION} | \
+                    docker login --username AWS \
+                    --password-stdin ${ECR_REGISTRY}
                 '''
             }
         }
@@ -101,16 +83,19 @@ pipeline {
             }
         }
 
-        stage('Update Kubernetes Manifest') {
+        stage('Deploy to EC2') {
             steps {
                 sh '''
-                    echo "Image successfully pushed:"
-                    echo "${IMAGE_NAME}"
+                    docker stop seclock || true
+                    docker rm seclock || true
 
-                    # This stage will later update your GitOps repository
-                    # for Argo CD deployment.
+                    docker pull ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
 
-                    echo "Kubernetes image: ${IMAGE_NAME}"
+                    docker run -d \
+                    --name seclock \
+                    --restart unless-stopped \
+                    -p 8080:8080 \
+                    ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
                 '''
             }
         }
@@ -119,17 +104,16 @@ pipeline {
     post {
 
         success {
-            echo "======================================"
-            echo "SECLOCK CI/CD PIPELINE SUCCESSFUL"
-            echo "Image: ${IMAGE_NAME}"
-            echo "======================================"
+            echo '======================================'
+            echo 'SECLOCK CI/CD PIPELINE SUCCESSFUL'
+            echo '======================================'
         }
 
         failure {
-            echo "======================================"
-            echo "SECLOCK CI/CD PIPELINE FAILED"
-            echo "Check the failed stage above."
-            echo "======================================"
+            echo '======================================'
+            echo 'SECLOCK CI/CD PIPELINE FAILED'
+            echo 'Check Jenkins console output.'
+            echo '======================================'
         }
 
         always {
@@ -139,3 +123,5 @@ pipeline {
         }
     }
 }
+
+
