@@ -1,438 +1,322 @@
 pipeline {
-
     agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
 
     environment {
         AWS_REGION     = 'ap-south-1'
         AWS_ACCOUNT_ID = '976193266769'
+
         ECR_REPOSITORY = 'seclock'
+        ECR_REGISTRY   = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        IMAGE_NAME     = "${ECR_REGISTRY}/${ECR_REPOSITORY}"
+        IMAGE_TAG      = "${BUILD_NUMBER}"
 
-        ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-
-        IMAGE_TAG    = "${BUILD_NUMBER}"
-        IMAGE_NAME   = "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
-        LATEST_IMAGE = "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
-
-        CONTAINER_NAME = 'seclock'
-        APP_PORT       = '8000'
+        SONARQUBE      = 'SonarQube'
+        SONAR_SCANNER  = 'sonar-scanner'
     }
 
     stages {
 
-        stage('Environment Check') {
+        /*
+         * 1. CHECKOUT
+         */
+        stage('Checkout') {
             steps {
+                echo 'Checking out SECLOCK source code...'
+
+                checkout scm
+
                 sh '''
-                    set -eu
+                    echo "Branch:"
+                    git branch --show-current
 
-                    echo "===== Environment Check ====="
+                    echo "Commit:"
+                    git rev-parse --short HEAD
 
+                    echo "Repository:"
+                    git remote -v
+                '''
+            }
+        }
+
+        /*
+         * 2. INSTALL PYTHON DEPENDENCIES
+         */
+        stage('Install Dependencies') {
+            steps {
+                echo 'Installing SECLOCK application dependencies...'
+
+                sh '''
                     python3 --version
-                    docker --version
-                    aws --version
-                    git --version
 
-                    echo ""
-                    echo "Workspace:"
-                    pwd
+                    rm -rf .venv
 
-                    echo ""
-                    echo "Repository files:"
-                    ls -la
+                    python3 -m venv .venv
+
+                    .venv/bin/python -m pip install --upgrade pip
+
+                    .venv/bin/pip install -r requirements.txt
                 '''
             }
         }
 
-        stage('Python Setup') {
+        /*
+         * 3. RUN END-TO-END TESTS
+         */
+        stage('Run Tests') {
             steps {
+                echo 'Running SECLOCK end-to-end tests...'
+
                 sh '''
-                    set -eu
+                    # Starlette TestClient requires httpx2
+                    .venv/bin/pip install httpx2
 
-                    echo "===== Python Setup ====="
-
-                    rm -rf venv
-
-                    python3 -m venv venv
-
-                    . venv/bin/activate
-
-                    python -m pip install --upgrade pip
-
-                    python -m pip install -r requirements.txt
-
-                    python -m pip install \
-                        pytest \
-                        bandit \
-                        httpx2
-
-                    echo "Python setup completed."
+                    # test_e2e.py is a standalone test script
+                    .venv/bin/python test_e2e.py
                 '''
             }
         }
 
-        stage('Application Import Check') {
+        /*
+         * 4. SONARQUBE ANALYSIS
+         */
+        stage('SonarQube Analysis') {
             steps {
-                sh '''
-                    set -eu
+                script {
+                    echo 'Running SonarQube analysis...'
 
-                    . venv/bin/activate
+                    def scannerHome = tool "${SONAR_SCANNER}"
 
-                    echo "===== FastAPI Import Check ====="
-
-                    python -c "from main import app; print('FastAPI application imported successfully')"
-                '''
+                    withSonarQubeEnv("${SONARQUBE}") {
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner \
+                              -Dsonar.projectKey=SECLOCK \
+                              -Dsonar.projectName=SECLOCK \
+                              -Dsonar.sources=. \
+                              -Dsonar.exclusions="k8s/**,sample_certificates/**,__pycache__/**,.venv/**"
+                        """
+                    }
+                }
             }
         }
 
-        stage('E2E Tests') {
-            steps {
-                sh '''
-                    set -eu
-
-                    . venv/bin/activate
-
-                    echo "========================================"
-                    echo "Running SEclock E2E Tests"
-                    echo "========================================"
-
-                    python test_e2e.py
-
-                    echo ""
-                    echo "ALL SEclock E2E TESTS PASSED."
-                '''
-            }
-        }
-
-        stage('Security Scan') {
-            steps {
-                sh '''
-                    set -eu
-
-                    . venv/bin/activate
-
-                    echo "===== Bandit Security Scan ====="
-
-                    bandit \
-                        -r main.py \
-                        crypto_engine.py \
-                        ocr_engine.py \
-                        audit_ledger.py \
-                        -f txt \
-                        --skip B105
-
-                    echo ""
-                    echo "Security scan completed successfully."
-                '''
-            }
-        }
-
+        /*
+         * 5. BUILD DOCKER IMAGE
+         */
         stage('Docker Build') {
             steps {
+                echo "Building Docker image: ${IMAGE_NAME}:${IMAGE_TAG}"
+
                 sh '''
-                    set -eu
-
-                    echo "===== Docker Build ====="
-
                     docker build \
-                        --pull \
-                        -t "${IMAGE_NAME}" \
-                        -t "${LATEST_IMAGE}" \
-                        .
-
-                    echo ""
-                    echo "Docker image built successfully."
-
-                    docker images "${ECR_REGISTRY}/${ECR_REPOSITORY}"
+                      -t ${IMAGE_NAME}:${IMAGE_TAG} \
+                      -t ${IMAGE_NAME}:latest \
+                      .
                 '''
-            }
-        }
 
-        stage('Docker Smoke Test') {
-            steps {
                 sh '''
-                    set -eu
-
-                    echo "===== Docker Smoke Test ====="
-
-                    TEST_CONTAINER="seclock-smoke-test"
-
-                    docker rm -f "${TEST_CONTAINER}" 2>/dev/null || true
-
-                    docker run -d \
-                        --name "${TEST_CONTAINER}" \
-                        -p 18000:8000 \
-                        "${IMAGE_NAME}"
-
-                    SUCCESS=0
-
-                    for i in $(seq 1 30); do
-
-                        if curl -fsS \
-                            --max-time 3 \
-                            "http://127.0.0.1:18000/" \
-                            > /dev/null 2>&1; then
-
-                            SUCCESS=1
-
-                            echo "Docker container is responding."
-
-                            break
-                        fi
-
-                        echo "Waiting... ${i}/30"
-
-                        sleep 2
-                    done
-
-                    if [ "${SUCCESS}" -ne 1 ]; then
-
-                        echo "ERROR: Docker container failed."
-
-                        docker ps -a \
-                            --filter "name=${TEST_CONTAINER}"
-
-                        echo ""
-                        echo "Container logs:"
-
-                        docker logs "${TEST_CONTAINER}" || true
-
-                        docker rm -f "${TEST_CONTAINER}" || true
-
-                        exit 1
-                    fi
-
-                    echo "Docker smoke test PASSED."
-
-                    docker logs "${TEST_CONTAINER}" || true
-
-                    docker rm -f "${TEST_CONTAINER}" || true
+                    echo "Docker images created:"
+                    docker images ${IMAGE_NAME}
                 '''
             }
         }
 
-        stage('AWS Check') {
+        /*
+         * 6. LOGIN TO AMAZON ECR
+         */
+        stage('ECR Login') {
             steps {
+                echo 'Logging into Amazon ECR...'
+
                 withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-root']
+                    usernamePassword(
+                        credentialsId: 'aws-ecr-credentials',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
                 ]) {
                     sh '''
-                        set -eu
+                        export AWS_DEFAULT_REGION=${AWS_REGION}
 
-                        echo "===== AWS Authentication ====="
+                        echo "Checking AWS identity..."
 
                         aws sts get-caller-identity
 
-                        echo ""
-                        echo "Checking ECR repository..."
-
-                        aws ecr describe-repositories \
-                            --repository-names "${ECR_REPOSITORY}" \
-                            --region "${AWS_REGION}" \
-                            > /dev/null
-
-                        echo ""
-                        echo "ECR repository exists."
-                    '''
-                }
-            }
-        }
-
-        stage('Login to ECR') {
-            steps {
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-root']
-                ]) {
-                    sh '''
-                        set -eu
-
-                        echo "===== Amazon ECR Login ====="
+                        echo "Logging into ECR..."
 
                         aws ecr get-login-password \
-                            --region "${AWS_REGION}" | \
+                          --region ${AWS_REGION} |
                         docker login \
-                            --username AWS \
-                            --password-stdin "${ECR_REGISTRY}"
-
-                        echo ""
-                        echo "ECR login successful."
+                          --username AWS \
+                          --password-stdin ${ECR_REGISTRY}
                     '''
                 }
             }
         }
 
-        stage('Push to ECR') {
+        /*
+         * 7. PUSH DOCKER IMAGE TO ECR
+         */
+        stage('Push Image to ECR') {
             steps {
+                echo "Pushing image ${IMAGE_NAME}:${IMAGE_TAG}"
+
+                sh '''
+                    docker push ${IMAGE_NAME}:${IMAGE_TAG}
+
+                    docker push ${IMAGE_NAME}:latest
+                '''
+            }
+        }
+
+        /*
+         * 8. UPDATE KUBERNETES MANIFEST
+         */
+        stage('Update Kubernetes Manifest') {
+            steps {
+                echo "Updating Kubernetes deployment image to ${IMAGE_TAG}..."
+
+                sh '''
+                    sed -i \
+                      "s|^[[:space:]]*image:.*|          image: ${IMAGE_NAME}:${IMAGE_TAG}|" \
+                      k8s/deployment.yaml
+
+                    echo "Updated Kubernetes deployment image:"
+
+                    grep "image:" k8s/deployment.yaml
+                '''
+            }
+        }
+
+        /*
+         * 9. COMMIT KUBERNETES CHANGE
+         */
+        stage('Commit GitOps Change') {
+            steps {
+                echo 'Committing Kubernetes manifest change...'
+
+                sh '''
+                    git config user.name "Jenkins"
+                    git config user.email "jenkins@localhost"
+
+                    git add k8s/deployment.yaml
+
+                    if git diff --cached --quiet; then
+                        echo "No Kubernetes manifest changes detected."
+                    else
+                        git commit \
+                          -m "Update SECLOCK image to ${IMAGE_TAG} [skip ci]"
+                    fi
+                '''
+            }
+        }
+
+        /*
+         * 10. PUSH MANIFEST CHANGE TO GITHUB
+         */
+        stage('Push GitOps Change') {
+            steps {
+                echo 'Pushing Kubernetes manifest update to GitHub...'
+
                 withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-root']
+                    usernamePassword(
+                        credentialsId: 'github-credentials',
+                        usernameVariable: 'GIT_USERNAME',
+                        passwordVariable: 'GIT_PASSWORD'
+                    )
                 ]) {
                     sh '''
-                        set -eu
+                        cat > .git-askpass <<'EOF'
+#!/bin/sh
 
-                        echo "===== Push Images to ECR ====="
+case "$1" in
+    *Username*)
+        echo "$GIT_USERNAME"
+        ;;
+    *Password*)
+        echo "$GIT_PASSWORD"
+        ;;
+esac
+EOF
 
-                        echo "Pushing:"
-                        echo "${IMAGE_NAME}"
+                        chmod 700 .git-askpass
 
-                        docker push "${IMAGE_NAME}"
+                        export GIT_ASKPASS="$PWD/.git-askpass"
+                        export GIT_TERMINAL_PROMPT=0
 
-                        echo ""
-                        echo "Pushing:"
-                        echo "${LATEST_IMAGE}"
+                        git push origin HEAD:main
 
-                        docker push "${LATEST_IMAGE}"
-
-                        echo ""
-                        echo "Images pushed successfully."
+                        rm -f .git-askpass
                     '''
                 }
-            }
-        }
-
-        stage('Deploy to EC2') {
-            steps {
-                sh '''
-                    set -eu
-
-                    echo "===== Deploying SEclock ====="
-
-                    docker pull "${LATEST_IMAGE}"
-
-                    docker stop "${CONTAINER_NAME}" 2>/dev/null || true
-
-                    docker rm "${CONTAINER_NAME}" 2>/dev/null || true
-
-                    docker run -d \
-                        --name "${CONTAINER_NAME}" \
-                        --restart unless-stopped \
-                        -p "${APP_PORT}:${APP_PORT}" \
-                        "${LATEST_IMAGE}"
-
-                    echo ""
-                    echo "Container started."
-
-                    docker ps \
-                        --filter "name=${CONTAINER_NAME}" \
-                        --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"
-                '''
-            }
-        }
-
-        stage('Verify Deployment') {
-            steps {
-                sh '''
-                    set -eu
-
-                    echo "===== Deployment Verification ====="
-
-                    SUCCESS=0
-
-                    for i in $(seq 1 30); do
-
-                        if curl -fsS \
-                            --max-time 5 \
-                            "http://127.0.0.1:${APP_PORT}/" \
-                            > /dev/null 2>&1; then
-
-                            SUCCESS=1
-
-                            echo ""
-                            echo "SEclock application is responding."
-
-                            break
-                        fi
-
-                        echo "Waiting... ${i}/30"
-
-                        sleep 2
-                    done
-
-                    if [ "${SUCCESS}" -ne 1 ]; then
-
-                        echo ""
-                        echo "ERROR: Deployment verification failed."
-
-                        echo ""
-                        echo "Container status:"
-
-                        docker ps -a \
-                            --filter "name=${CONTAINER_NAME}"
-
-                        echo ""
-                        echo "Application logs:"
-
-                        docker logs "${CONTAINER_NAME}" || true
-
-                        exit 1
-                    fi
-
-                    echo ""
-                    echo "========================================"
-                    echo "SEclock DEPLOYMENT SUCCESSFUL"
-                    echo "========================================"
-                    echo ""
-                    echo "Application:"
-                    echo "http://EC2_PUBLIC_IP:${APP_PORT}"
-                    echo ""
-                    echo "Port: ${APP_PORT}"
-                    echo "========================================"
-                '''
             }
         }
     }
 
+    /*
+     * POST BUILD ACTIONS
+     */
     post {
 
-        success {
-            echo '''
-========================================
-       SECLOCK CI/CD SUCCESS
-========================================
-
-E2E Tests       : PASSED
-Security Scan   : PASSED
-Docker Build    : PASSED
-Docker Test     : PASSED
-AWS Check       : PASSED
-ECR Login       : PASSED
-ECR Push        : PASSED
-EC2 Deployment  : PASSED
-Verification    : PASSED
-
-Application Port: 8000
-
-========================================
-            '''
-        }
-
-        failure {
-            sh '''
-                echo "========================================"
-                echo "SECLOCK PIPELINE FAILED"
-                echo "========================================"
-
-                echo ""
-                echo "Container status:"
-
-                docker ps -a \
-                    --filter "name=seclock" || true
-
-                echo ""
-                echo "SEclock logs:"
-
-                docker logs seclock 2>/dev/null || true
-
-                echo ""
-                echo "========================================"
-            '''
-        }
-
+        /*
+         * ALWAYS RUN
+         */
         always {
             sh '''
-                docker rm -f seclock-smoke-test 2>/dev/null || true
-                docker image prune -f || true
+                echo "Cleaning up..."
+
+                docker logout ${ECR_REGISTRY} || true
+
+                rm -rf .venv
+
+                rm -f .git-askpass
             '''
+        }
+
+        /*
+         * SUCCESS
+         */
+        success {
+            echo '''
+============================================
+      SECLOCK CI/CD PIPELINE SUCCESSFUL
+============================================
+
+Checkout           : PASSED
+Dependencies       : PASSED
+E2E Tests          : PASSED
+SonarQube          : COMPLETED
+Docker Build       : PASSED
+ECR Login          : PASSED
+ECR Push           : PASSED
+Kubernetes Update  : PASSED
+Git Push           : PASSED
+
+Argo CD will detect the Git change
+and synchronize SECLOCK to EKS.
+
+============================================
+'''
+        }
+
+        /*
+         * FAILURE
+         */
+        failure {
+            echo '''
+============================================
+        SECLOCK CI/CD PIPELINE FAILED
+============================================
+
+Check the failed stage in the Jenkins
+console output.
+
+============================================
+'''
         }
     }
 }
