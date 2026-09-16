@@ -22,34 +22,26 @@ pipeline {
         }
 
         stage('Python Setup') {
-            steps {
-                sh '''
-                    python3 --version
-                    pip3 --version
+    steps {
+        sh '''
+            python3 --version
+            python3 -m venv venv
+            . venv/bin/activate
 
-                    python3 -m venv venv
-                    . venv/bin/activate
-
-                    pip install --upgrade pip
-                    pip install -r requirements.txt
-                    pip install pytest bandit
-                '''
-            }
-        }
+            python -m pip install --upgrade pip
+            python -m pip install -r requirements.txt
+        '''
+    }
+}
 
         stage('Unit Tests') {
-            steps {
-                sh '''
-                    . venv/bin/activate
-
-                    if [ -d "tests" ]; then
-                        pytest -v
-                    else
-                        echo "No tests directory found - skipping tests"
-                    fi
-                '''
-            }
-        }
+    steps {
+        sh '''
+            . venv/bin/activate
+            python -m pytest test_e2e.py -v
+        '''
+    }
+}
 
         stage('Security Scan - Bandit') {
             steps {
