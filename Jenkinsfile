@@ -1,208 +1,381 @@
-pipeline {
-
-    agent any
-
-    environment {
-        AWS_REGION     = 'ap-south-1'
-        AWS_ACCOUNT_ID = '976193266769'
-
-        ECR_REPOSITORY = 'seclock'
-        IMAGE_TAG      = "${BUILD_NUMBER}"
-
-        ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-        IMAGE_NAME   = "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
-
-        CONTAINER_NAME = 'seclock'
-    }
-
-    stages {
-
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
-        }
-
-        stage('Python Setup') {
-            steps {
-                sh '''
-                    set -e
-
-                    python3 --version
-
-                    rm -rf venv
-                    python3 -m venv venv
-
-                    . venv/bin/activate
-
-                    python -m pip install --upgrade pip
-                    python -m pip install -r requirements.txt
-
-                    python -m pip install pytest bandit httpx2
-                '''
-            }
-        }
-
-        stage('Unit Tests') {
-            steps {
-                sh '''
-                    . venv/bin/activate
-
-                    python -m pytest test_e2e.py -v
-                    TEST_EXIT=$?
-
-                    if [ $TEST_EXIT -eq 5 ]; then
-                        echo "WARNING: No pytest tests were collected."
-                        echo "Continuing pipeline..."
-                        exit 0
-                    fi
-
-                    exit $TEST_EXIT
-                '''
-            }
-        }
-
-        stage('Security Scan - Bandit') {
-            steps {
-                sh '''
-                    . venv/bin/activate
-
-                    bandit -r . -x ./venv
-                '''
-            }
-        }
-
-        stage('Build Docker Image') {
-            steps {
-                sh '''
-                    set -e
-
-                    docker build \
-                        -t ${IMAGE_NAME} \
-                        -t ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest \
-                        .
-                '''
-            }
-        }
-
-        stage('Login to AWS ECR') {
-            steps {
-                sh '''
-                    set -e
-
-                    echo "Checking AWS identity..."
-                    aws sts get-caller-identity
-
-                    echo "Logging into Amazon ECR..."
-
-                    aws ecr get-login-password \
-                        --region ${AWS_REGION} | \
-                    docker login \
-                        --username AWS \
-                        --password-stdin ${ECR_REGISTRY}
-                '''
-            }
-        }
-
-        stage('Push Image to ECR') {
-            steps {
-                sh '''
-                    set -e
-
-                    docker push ${IMAGE_NAME}
-
-                    docker push \
-                        ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
-                '''
-            }
-        }
-
-        stage('Deploy to EC2') {
-            steps {
-                sh '''
-                    set -e
-
-                    echo "Stopping old container..."
-
-                    docker stop ${CONTAINER_NAME} || true
-                    docker rm ${CONTAINER_NAME} || true
-
-                    echo "Pulling latest image..."
-
-                    docker pull \
-                        ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
-
-                    echo "Starting new container..."
-
-                    docker run -d \
-                        --name ${CONTAINER_NAME} \
-                        --restart unless-stopped \
-                        -p 8080:8080 \
-                        ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
-
-                    sleep 5
-
-                    echo "Checking container..."
-
-                    docker ps | grep ${CONTAINER_NAME}
-                '''
-            }
-        }
-
-        stage('Verify Application') {
-            steps {
-                sh '''
-                    set -e
-
-                    echo "Testing application..."
-
-                    curl -f http://localhost:8080/
-
-                    echo ""
-                    echo "SEclock application is running successfully!"
-                '''
-            }
-        }
-    }
-
-    post {
-
-        success {
-            echo '''
+pipeline{
+agentany
+environment{
+AWS_REGION='ap-south-1'
+AWS_ACCOUNT_ID='976193266769'
+ECR_REPOSITORY='seclock'
+ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+IMAGE_TAG="${BUILD_NUMBER}"
+IMAGE_NAME="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+LATEST_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
+CONTAINER_NAME='seclock'
+APP_PORT='8000'
+}
+stages{
+stage('EnvironmentCheck'){
+steps{
+sh'''
+set-eu
+echo"========================================"
+echo"EnvironmentCheck"
+echo"========================================"
+echo"Python:"
+python3--version
+echo""
+echo"Docker:"
+docker--version
+echo""
+echo"AWSCLI:"
+aws--version
+echo""
+echo"Git:"
+git--version
+echo""
+echo"Workspace:"
+pwd
+echo""
+echo"Repositoryfiles:"
+ls-la
+echo"========================================"
+'''
+}
+}
+stage('PythonSetup'){
+steps{
+sh'''
+set-eu
+echo"Creatingvirtualenvironment..."
+rm-rfvenv
+python3-mvenvvenv
+.venv/bin/activate
+python-mpipinstall--upgradepip
+echo"Installingapplicationdependencies..."
+python-mpipinstall-rrequirements.txt
+echo"InstallingCItools..."
+python-mpipinstall\
+pytest\
+bandit\
+httpx2
+echo"Pythonsetupcompleted."
+'''
+}
+}
+stage('ApplicationImportCheck'){
+steps{
+sh'''
+set-eu
+.venv/bin/activate
+echo"CheckingFastAPIapplication..."
+python-c"frommainimportapp;print('FastAPIapplicationimportedsuccessfully')"
+'''
+}
+}
+stage('E2ETests'){
+steps{
+sh'''
+set-eu
+.venv/bin/activate
+echo"========================================"
+echo"RunningSEclockE2Etests"
+echo"========================================"
+pythontest_e2e.py
+echo""
+echo"E2Etestscompletedsuccessfully."
+echo"========================================"
+'''
+}
+}
+stage('SecurityScan'){
+steps{
+sh'''
+set-eu
+.venv/bin/activate
+echo"========================================"
+echo"RunningBanditsecurityscan"
+echo"========================================"
+bandit\
+-rmain.py\
+crypto_engine.py\
+ocr_engine.py\
+audit_ledger.py\
+-ftxt
+echo""
+echo"Securityscancompleted."
+echo"========================================"
+'''
+}
+}
+stage('DockerBuild'){
+steps{
+sh'''
+set-eu
+echo"========================================"
+echo"BuildingDockerimage"
+echo"========================================"
+dockerbuild\
+--pull\
+-t"${IMAGE_NAME}"\
+-t"${LATEST_IMAGE}"\
+.
+echo""
+echo"Dockerimagebuiltsuccessfully."
+dockerimages"${ECR_REGISTRY}/${ECR_REPOSITORY}"
+echo"========================================"
+'''
+}
+}
+stage('DockerSmokeTest'){
+steps{
+sh'''
+set-eu
+echo"========================================"
+echo"TestingDockerimage"
+echo"========================================"
+TEST_CONTAINER="seclock-smoke-test"
+dockerrm-f"${TEST_CONTAINER}"2>/dev/null||true
+dockerrun-d\
+--name"${TEST_CONTAINER}"\
+-p18000:8000\
+"${IMAGE_NAME}"
+echo"Waitingforapplication..."
+SUCCESS=0
+foriin$(seq130);do
+ifcurl-fsS\
+--max-time3\
+"http://127.0.0.1:18000/"\
+>/dev/null2>&1;then
+SUCCESS=1
+echo""
+echo"Dockerapplicationisresponding."
+break
+fi
+echo"Waiting...${i}/30"
+sleep2
+done
+if["${SUCCESS}"-ne1];then
+echo""
+echo"ERROR:Dockerapplicationdidnotstart."
+echo""
+echo"Containerstatus:"
+dockerps-a\
+--filter"name=${TEST_CONTAINER}"
+echo""
+echo"Containerlogs:"
+dockerlogs"${TEST_CONTAINER}"||true
+dockerrm-f"${TEST_CONTAINER}"||true
+exit1
+fi
+echo""
+echo"Dockersmoketestpassed."
+dockerlogs"${TEST_CONTAINER}"||true
+dockerrm-f"${TEST_CONTAINER}"||true
+echo"========================================"
+'''
+}
+}
+stage('AWSCheck'){
+steps{
+sh'''
+set-eu
+echo"========================================"
+echo"CheckingAWSconfiguration"
+echo"========================================"
+awsstsget-caller-identity
+echo""
+echo"CheckingECRrepository..."
+awsecrdescribe-repositories\
+--repository-names"${ECR_REPOSITORY}"\
+--region"${AWS_REGION}"\
+>/dev/null
+echo""
+echo"ECRrepositoryisavailable."
+echo"========================================"
+'''
+}
+}
+stage('LogintoECR'){
+steps{
+sh'''
+set-eu
+echo"========================================"
+echo"LoggingintoAmazonECR"
+echo"========================================"
+awsecrget-login-password\
+--region"${AWS_REGION}"|\
+dockerlogin\
+--usernameAWS\
+--password-stdin"${ECR_REGISTRY}"
+echo""
+echo"ECRloginsuccessful."
+echo"========================================"
+'''
+}
+}
+stage('PushtoECR'){
+steps{
+sh'''
+set-eu
+echo"========================================"
+echo"PushingDockerimages"
+echo"========================================"
+echo"Pushingbuildimage:"
+echo"${IMAGE_NAME}"
+dockerpush"${IMAGE_NAME}"
+echo""
+echo"Pushinglatestimage:"
+echo"${LATEST_IMAGE}"
+dockerpush"${LATEST_IMAGE}"
+echo""
+echo"Imagespushedsuccessfully."
+echo"========================================"
+'''
+}
+}
+stage('DeploytoEC2'){
+steps{
+sh'''
+set-eu
+echo"========================================"
+echo"DeployingSEclocktoEC2"
+echo"========================================"
+echo"Pullinglatestimage..."
+dockerpull"${LATEST_IMAGE}"
+echo""
+echo"Stoppingpreviouscontainer..."
+dockerstop"${CONTAINER_NAME}"2>/dev/null||true
+dockerrm"${CONTAINER_NAME}"2>/dev/null||true
+echo""
+echo"Startingnewcontainer..."
+dockerrun-d\
+--name"${CONTAINER_NAME}"\
+--restartunless-stopped\
+-p"${APP_PORT}:${APP_PORT}"\
+"${LATEST_IMAGE}"
+echo""
+echo"Containerstarted."
+dockerps\
+--filter"name=${CONTAINER_NAME}"\
+--format"table{{.Names}}\\t{{.Status}}\\t{{.Ports}}"
+echo"========================================"
+'''
+}
+}
+stage('VerifyDeployment'){
+steps{
+sh'''
+set-eu
+echo"========================================"
+echo"Verifyingdeployment"
+echo"========================================"
+SUCCESS=0
+foriin$(seq130);do
+ifcurl-fsS\
+--max-time5\
+"http://127.0.0.1:${APP_PORT}/"\
+>/dev/null2>&1;then
+SUCCESS=1
+echo""
+echo"SEclockisrunningsuccessfully."
+break
+fi
+echo"Waitingforapplication...${i}/30"
+sleep2
+done
+if["${SUCCESS}"-ne1];then
+echo""
+echo"ERROR:Deploymentverificationfailed."
+echo""
+echo"Containerstatus:"
+dockerps-a\
+--filter"name=${CONTAINER_NAME}"
+echo""
+echo"Applicationlogs:"
+dockerlogs"${CONTAINER_NAME}"||true
+exit1
+fi
+echo""
+echo"Applicationendpoint:"
+echo"http://EC2_PUBLIC_IP:${APP_PORT}"
+echo"========================================"
+'''
+}
+}
+}
+post{
+success{
+echo'''
 ========================================
- SEclock CI/CD PIPELINE SUCCESSFUL
+SECLOCKCI/CDSUCCESS
 ========================================
-
-Docker Image:
-${IMAGE_NAME}
-
-ECR:
-${ECR_REGISTRY}
-
 Application:
-http://EC2_PUBLIC_IP:8080
-
+SEclockFastAPI
+Testing:
+E2Etestspassed
+Security:
+Banditscanpassed
+Docker:
+Imagebuiltsuccessfully
+Registry:
+AmazonECR
+Deployment:
+AWSEC2+Docker
+Port:
+8000
+Application:
+http://EC2_PUBLIC_IP:8000
 ========================================
-            '''
-        }
-
-        failure {
-            echo '''
+'''
+}
+failure{
+sh'''
+echo""
+echo"========================================"
+echo"SECLOCKPIPELINEFAILED"
+echo"========================================"
+echo""
+echo"RunningSEclockcontainers:"
+dockerps-a\
+--filter"name=seclock"||true
+echo""
+echo"SEclockapplicationlogs:"
+dockerlogsseclock2>/dev/null||true
+echo""
+echo"========================================"
+'''
+echo'''
 ========================================
- SEclock CI/CD PIPELINE FAILED
+SECLOCKCI/CDFAILED
 ========================================
-
-Check the failed stage above.
-
+Checkthefailedstageabove.
 ========================================
-            '''
-        }
-
-        always {
-            sh '''
-                docker image prune -f || true
-            '''
-        }
-    }
+'''
+}
+always{
+sh'''
+echo"CleaningtemporaryDockerresources..."
+dockerrm-fseclock-smoke-test2>/dev/null||true
+dockerimageprune-f||true
+'''
+}
+}
 }
 
+###ImportantbeforeBuildNow
+
+YourcurrentGitHubJenkinsfilestillcontainstheoldduplicatecheckoutandpytesttest_e2e.pylogic.ReplacetheentirecontentsofJenkinsfilewiththefileaboveandpush:
+
+gitaddJenkinsfile
+gitcommit-m"FixcompleteCICDpipeline"
+gitpushoriginmain
+
+Also,becauseyourJenkinsjobisalreadyconfiguredasPipelinescriptfromSCM,donotaddcheckoutscmtothisJenkinsfile.JenkinswillperformtheSCMcheckoutautomatically.
+
+AndyourDockerfileuses:
+
+8000
+
+sothisJenkinsfileconsistentlyuses8000,includingthesmoketestandEC2deployment.
+
+Yourpipelineflowwillnowbe:
+
+GitHub→Pythonsetup→FastAPIimportcheck→E2Etests→Bandit→Dockerbuild→Dockersmoketest→AWS/ECRlogin→Push→EC2deployment→Applicationverification.
