@@ -1,17 +1,18 @@
-
 pipeline {
 
     agent any
 
     environment {
-        AWS_REGION = 'ap-south-1'
+        AWS_REGION     = 'ap-south-1'
         AWS_ACCOUNT_ID = '976193266769'
 
         ECR_REPOSITORY = 'seclock'
-        IMAGE_TAG = "${BUILD_NUMBER}"
+        IMAGE_TAG      = "${BUILD_NUMBER}"
 
         ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-        IMAGE_NAME = "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+        IMAGE_NAME   = "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+        CONTAINER_NAME = 'seclock'
     }
 
     stages {
@@ -25,14 +26,20 @@ pipeline {
         stage('Python Setup') {
             steps {
                 sh '''
+                    set -e
+
                     python3 --version
 
+                    rm -rf venv
                     python3 -m venv venv
+
                     . venv/bin/activate
 
                     python -m pip install --upgrade pip
+
                     python -m pip install -r requirements.txt
-                    python -m pip install pytest bandit
+
+                    python -m pip install pytest bandit httpx2
                 '''
             }
         }
@@ -40,7 +47,10 @@ pipeline {
         stage('Unit Tests') {
             steps {
                 sh '''
+                    set -e
+
                     . venv/bin/activate
+
                     python -m pytest test_e2e.py -v
                 '''
             }
@@ -50,6 +60,7 @@ pipeline {
             steps {
                 sh '''
                     . venv/bin/activate
+
                     bandit -r . -x ./venv
                 '''
             }
@@ -58,8 +69,12 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 sh '''
-                    docker build -t ${IMAGE_NAME} .
-                    docker tag ${IMAGE_NAME} ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
+                    set -e
+
+                    docker build \
+                        -t ${IMAGE_NAME} \
+                        -t ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest \
+                        .
                 '''
             }
         }
@@ -67,9 +82,15 @@ pipeline {
         stage('Login to AWS ECR') {
             steps {
                 sh '''
-                    aws ecr get-login-password --region ${AWS_REGION} | \
-                    docker login --username AWS \
-                    --password-stdin ${ECR_REGISTRY}
+                    set -e
+
+                    aws sts get-caller-identity
+
+                    aws ecr get-login-password \
+                        --region ${AWS_REGION} | \
+                    docker login \
+                        --username AWS \
+                        --password-stdin ${ECR_REGISTRY}
                 '''
             }
         }
@@ -77,7 +98,10 @@ pipeline {
         stage('Push Image to ECR') {
             steps {
                 sh '''
+                    set -e
+
                     docker push ${IMAGE_NAME}
+
                     docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
                 '''
             }
@@ -86,16 +110,37 @@ pipeline {
         stage('Deploy to EC2') {
             steps {
                 sh '''
-                    docker stop seclock || true
-                    docker rm seclock || true
+                    set -e
+
+                    docker stop ${CONTAINER_NAME} || true
+                    docker rm ${CONTAINER_NAME} || true
 
                     docker pull ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
 
                     docker run -d \
-                    --name seclock \
-                    --restart unless-stopped \
-                    -p 8080:8080 \
-                    ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
+                        --name ${CONTAINER_NAME} \
+                        --restart unless-stopped \
+                        -p 8080:8080 \
+                        ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
+
+                    sleep 5
+
+                    docker ps | grep ${CONTAINER_NAME}
+                '''
+            }
+        }
+
+        stage('Verify Application') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "Checking application..."
+
+                    curl -f http://localhost:8080/ || \
+                    (docker logs ${CONTAINER_NAME} && exit 1)
+
+                    echo "Application is running successfully."
                 '''
             }
         }
@@ -104,16 +149,27 @@ pipeline {
     post {
 
         success {
-            echo '======================================'
-            echo 'SECLOCK CI/CD PIPELINE SUCCESSFUL'
-            echo '======================================'
+            echo '''
+========================================
+ SEclock CI/CD PIPELINE SUCCESSFUL
+========================================
+ Image:
+ ECR deployment completed.
+
+ Application:
+ http://EC2_PUBLIC_IP:8080
+========================================
+            '''
         }
 
         failure {
-            echo '======================================'
-            echo 'SECLOCK CI/CD PIPELINE FAILED'
-            echo 'Check Jenkins console output.'
-            echo '======================================'
+            echo '''
+========================================
+ SEclock CI/CD PIPELINE FAILED
+========================================
+ Check the failed stage above.
+========================================
+            '''
         }
 
         always {
@@ -123,5 +179,3 @@ pipeline {
         }
     }
 }
-
-
