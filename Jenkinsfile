@@ -24,23 +24,11 @@ pipeline {
                 sh '''
                     set -eu
 
-                    echo "========================================"
-                    echo "Environment Check"
-                    echo "========================================"
+                    echo "===== Environment Check ====="
 
-                    echo "Python:"
                     python3 --version
-
-                    echo ""
-                    echo "Docker:"
                     docker --version
-
-                    echo ""
-                    echo "AWS CLI:"
                     aws --version
-
-                    echo ""
-                    echo "Git:"
                     git --version
 
                     echo ""
@@ -50,8 +38,6 @@ pipeline {
                     echo ""
                     echo "Repository files:"
                     ls -la
-
-                    echo "========================================"
                 '''
             }
         }
@@ -61,9 +47,7 @@ pipeline {
                 sh '''
                     set -eu
 
-                    echo "========================================"
-                    echo "Python Setup"
-                    echo "========================================"
+                    echo "===== Python Setup ====="
 
                     rm -rf venv
 
@@ -73,11 +57,7 @@ pipeline {
 
                     python -m pip install --upgrade pip
 
-                    echo "Installing application dependencies..."
-
                     python -m pip install -r requirements.txt
-
-                    echo "Installing CI dependencies..."
 
                     python -m pip install \
                         pytest \
@@ -85,8 +65,6 @@ pipeline {
                         httpx2
 
                     echo "Python setup completed."
-
-                    echo "========================================"
                 '''
             }
         }
@@ -98,13 +76,9 @@ pipeline {
 
                     . venv/bin/activate
 
-                    echo "========================================"
-                    echo "FastAPI Import Check"
-                    echo "========================================"
+                    echo "===== FastAPI Import Check ====="
 
                     python -c "from main import app; print('FastAPI application imported successfully')"
-
-                    echo "========================================"
                 '''
             }
         }
@@ -117,14 +91,13 @@ pipeline {
                     . venv/bin/activate
 
                     echo "========================================"
-                    echo "SEclock E2E Tests"
+                    echo "Running SEclock E2E Tests"
                     echo "========================================"
 
                     python test_e2e.py
 
                     echo ""
                     echo "ALL SEclock E2E TESTS PASSED."
-                    echo "========================================"
                 '''
             }
         }
@@ -136,9 +109,7 @@ pipeline {
 
                     . venv/bin/activate
 
-                    echo "========================================"
-                    echo "Bandit Security Scan"
-                    echo "========================================"
+                    echo "===== Bandit Security Scan ====="
 
                     bandit \
                         -r main.py \
@@ -149,8 +120,7 @@ pipeline {
                         --skip B105
 
                     echo ""
-                    echo "Bandit security scan completed successfully."
-                    echo "========================================"
+                    echo "Security scan completed successfully."
                 '''
             }
         }
@@ -160,9 +130,7 @@ pipeline {
                 sh '''
                     set -eu
 
-                    echo "========================================"
-                    echo "Docker Build"
-                    echo "========================================"
+                    echo "===== Docker Build ====="
 
                     docker build \
                         --pull \
@@ -173,11 +141,7 @@ pipeline {
                     echo ""
                     echo "Docker image built successfully."
 
-                    echo ""
-                    echo "Images:"
                     docker images "${ECR_REGISTRY}/${ECR_REPOSITORY}"
-
-                    echo "========================================"
                 '''
             }
         }
@@ -187,9 +151,7 @@ pipeline {
                 sh '''
                     set -eu
 
-                    echo "========================================"
-                    echo "Docker Smoke Test"
-                    echo "========================================"
+                    echo "===== Docker Smoke Test ====="
 
                     TEST_CONTAINER="seclock-smoke-test"
 
@@ -199,9 +161,6 @@ pipeline {
                         --name "${TEST_CONTAINER}" \
                         -p 18000:8000 \
                         "${IMAGE_NAME}"
-
-                    echo ""
-                    echo "Waiting for FastAPI container..."
 
                     SUCCESS=0
 
@@ -214,24 +173,19 @@ pipeline {
 
                             SUCCESS=1
 
-                            echo ""
                             echo "Docker container is responding."
 
                             break
                         fi
 
-                        echo "Waiting... attempt ${i}/30"
+                        echo "Waiting... ${i}/30"
 
                         sleep 2
                     done
 
                     if [ "${SUCCESS}" -ne 1 ]; then
 
-                        echo ""
-                        echo "ERROR: Docker container did not start correctly."
-
-                        echo ""
-                        echo "Container status:"
+                        echo "ERROR: Docker container failed."
 
                         docker ps -a \
                             --filter "name=${TEST_CONTAINER}"
@@ -246,95 +200,93 @@ pipeline {
                         exit 1
                     fi
 
-                    echo ""
                     echo "Docker smoke test PASSED."
 
                     docker logs "${TEST_CONTAINER}" || true
 
                     docker rm -f "${TEST_CONTAINER}" || true
-
-                    echo "========================================"
                 '''
             }
         }
 
         stage('AWS Check') {
             steps {
-                sh '''
-                    set -eu
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-root']
+                ]) {
+                    sh '''
+                        set -eu
 
-                    echo "========================================"
-                    echo "AWS / ECR Check"
-                    echo "========================================"
+                        echo "===== AWS Authentication ====="
 
-                    echo "AWS Identity:"
+                        aws sts get-caller-identity
 
-                    aws sts get-caller-identity
+                        echo ""
+                        echo "Checking ECR repository..."
 
-                    echo ""
-                    echo "Checking ECR repository..."
+                        aws ecr describe-repositories \
+                            --repository-names "${ECR_REPOSITORY}" \
+                            --region "${AWS_REGION}" \
+                            > /dev/null
 
-                    aws ecr describe-repositories \
-                        --repository-names "${ECR_REPOSITORY}" \
-                        --region "${AWS_REGION}" \
-                        > /dev/null
-
-                    echo ""
-                    echo "ECR repository exists."
-
-                    echo "========================================"
-                '''
+                        echo ""
+                        echo "ECR repository exists."
+                    '''
+                }
             }
         }
 
         stage('Login to ECR') {
             steps {
-                sh '''
-                    set -eu
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-root']
+                ]) {
+                    sh '''
+                        set -eu
 
-                    echo "========================================"
-                    echo "Amazon ECR Login"
-                    echo "========================================"
+                        echo "===== Amazon ECR Login ====="
 
-                    aws ecr get-login-password \
-                        --region "${AWS_REGION}" | \
-                    docker login \
-                        --username AWS \
-                        --password-stdin "${ECR_REGISTRY}"
+                        aws ecr get-login-password \
+                            --region "${AWS_REGION}" | \
+                        docker login \
+                            --username AWS \
+                            --password-stdin "${ECR_REGISTRY}"
 
-                    echo ""
-                    echo "ECR login successful."
-
-                    echo "========================================"
-                '''
+                        echo ""
+                        echo "ECR login successful."
+                    '''
+                }
             }
         }
 
         stage('Push to ECR') {
             steps {
-                sh '''
-                    set -eu
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                     credentialsId: 'aws-root']
+                ]) {
+                    sh '''
+                        set -eu
 
-                    echo "========================================"
-                    echo "Push Docker Images to ECR"
-                    echo "========================================"
+                        echo "===== Push Images to ECR ====="
 
-                    echo "Pushing build image:"
-                    echo "${IMAGE_NAME}"
+                        echo "Pushing:"
+                        echo "${IMAGE_NAME}"
 
-                    docker push "${IMAGE_NAME}"
+                        docker push "${IMAGE_NAME}"
 
-                    echo ""
-                    echo "Pushing latest image:"
-                    echo "${LATEST_IMAGE}"
+                        echo ""
+                        echo "Pushing:"
+                        echo "${LATEST_IMAGE}"
 
-                    docker push "${LATEST_IMAGE}"
+                        docker push "${LATEST_IMAGE}"
 
-                    echo ""
-                    echo "Docker images pushed successfully."
-
-                    echo "========================================"
-                '''
+                        echo ""
+                        echo "Images pushed successfully."
+                    '''
+                }
             }
         }
 
@@ -343,23 +295,13 @@ pipeline {
                 sh '''
                     set -eu
 
-                    echo "========================================"
-                    echo "Deploy SEclock to EC2"
-                    echo "========================================"
-
-                    echo "Pulling latest image..."
+                    echo "===== Deploying SEclock ====="
 
                     docker pull "${LATEST_IMAGE}"
-
-                    echo ""
-                    echo "Stopping existing container..."
 
                     docker stop "${CONTAINER_NAME}" 2>/dev/null || true
 
                     docker rm "${CONTAINER_NAME}" 2>/dev/null || true
-
-                    echo ""
-                    echo "Starting new SEclock container..."
 
                     docker run -d \
                         --name "${CONTAINER_NAME}" \
@@ -370,14 +312,9 @@ pipeline {
                     echo ""
                     echo "Container started."
 
-                    echo ""
-                    echo "Container status:"
-
                     docker ps \
                         --filter "name=${CONTAINER_NAME}" \
                         --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"
-
-                    echo "========================================"
                 '''
             }
         }
@@ -387,9 +324,7 @@ pipeline {
                 sh '''
                     set -eu
 
-                    echo "========================================"
-                    echo "Deployment Verification"
-                    echo "========================================"
+                    echo "===== Deployment Verification ====="
 
                     SUCCESS=0
 
@@ -408,7 +343,7 @@ pipeline {
                             break
                         fi
 
-                        echo "Waiting for application... attempt ${i}/30"
+                        echo "Waiting... ${i}/30"
 
                         sleep 2
                     done
@@ -434,18 +369,13 @@ pipeline {
 
                     echo ""
                     echo "========================================"
-                    echo "SEclock DEPLOYMENT VERIFIED"
+                    echo "SEclock DEPLOYMENT SUCCESSFUL"
                     echo "========================================"
                     echo ""
                     echo "Application:"
                     echo "http://EC2_PUBLIC_IP:${APP_PORT}"
                     echo ""
-                    echo "Container:"
-                    echo "${CONTAINER_NAME}"
-                    echo ""
-                    echo "Port:"
-                    echo "${APP_PORT}"
-                    echo ""
+                    echo "Port: ${APP_PORT}"
                     echo "========================================"
                 '''
             }
@@ -464,6 +394,7 @@ E2E Tests       : PASSED
 Security Scan   : PASSED
 Docker Build    : PASSED
 Docker Test     : PASSED
+AWS Check       : PASSED
 ECR Login       : PASSED
 ECR Push        : PASSED
 EC2 Deployment  : PASSED
@@ -495,24 +426,11 @@ Application Port: 8000
                 echo ""
                 echo "========================================"
             '''
-
-            echo '''
-========================================
-       SECLOCK CI/CD FAILED
-========================================
-
-Check the failed stage above.
-
-========================================
-            '''
         }
 
         always {
             sh '''
-                echo "Cleaning temporary Docker resources..."
-
                 docker rm -f seclock-smoke-test 2>/dev/null || true
-
                 docker image prune -f || true
             '''
         }
